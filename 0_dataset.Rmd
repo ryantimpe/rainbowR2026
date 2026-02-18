@@ -1,0 +1,144 @@
+---
+title: "The Cheesecake ROI: Data"
+---
+
+MMMs in Tidymodels for RainbowR conference
+
+Generate data set cheesecake_sales
+
+I build sales up from theoretical marketing data to ensure there's a relationship between each input and sales.
+
+```{r}
+library(tidymodels) 
+
+### Creating demo sales data, starting from theoretical input
+set.seed(12334)
+```
+
+## Input data 
+
+Generated input data
+
+```{r}
+d0 <- crossing(
+  time_year = 1:3,
+  time_week = 1:52
+) |> 
+  
+  # Baseline + seasonality
+  mutate(
+    baseline__trend = 1:n() + 10,
+    time_holiday = case_when(
+      glue::glue("{time_year} {time_week}") %in% c("1 17", "2 15", "3 16") ~ "Easter",
+      time_week %in% c(48) ~ "Thanksgiving",
+      time_week %in% c(50, 51) ~ "Christmas",
+      time_week %in% 23:34 ~ "Summer",
+      TRUE ~ ""
+    ), 
+    baseline__holiday_easter = as.numeric(time_holiday == "Easter"),
+    baseline__holiday_thanksgiving = as.numeric(time_holiday == "Thanksgiving"),
+    baseline__holiday_christmas = as.numeric(time_holiday == "Christmas"),
+    baseline__summer = as.numeric(time_holiday == "Summer")
+  ) |> 
+  # Sample marketing SPEND
+  mutate(
+    rng_sampler = pmax(round(rnorm(n(), 10, 3),0),0),
+    media__tv_spend = ifelse(time_week %in% c(12:15, 45:47), (time_week+rng_sampler)*time_year*rng_sampler/4, 0),
+    media__newspp_spend = runif(n(), 20, 80),
+    media__newspp_spend = ifelse(media__newspp_spend < 40, 0, media__newspp_spend),
+    media__bllbrd_spend = ifelse(
+      (baseline__holiday_easter == 1) |
+        (lag(baseline__holiday_easter, 1) == 1) |
+        (baseline__holiday_thanksgiving == 1) |
+        (lag(baseline__holiday_thanksgiving, 1) == 1) |
+        (baseline__holiday_christmas == 1) |
+        (lag(baseline__holiday_christmas, 1) == 1)
+      , 100, 0)
+  ) |> 
+  replace_na(list(media__bllbrd_spend = 0)) |> 
+  
+  # Impressions
+  # make up cost per impression
+  # the reverse calc the impressions we got
+  mutate(
+    cpi_tv = 1.5,
+    cpi_bllbrd = 0.5 + 0.1*time_year,
+    cpi_newspp = 1.0 - 0.1*time_year,
+    media__tv_imp = media__tv_spend/cpi_tv,
+    media__bllbrd_imp = media__bllbrd_spend/cpi_bllbrd,
+    media__newspp_imp = media__newspp_spend/cpi_newspp
+  ) |> 
+  
+  #Simple unobserved component
+  mutate(
+    unobserved__noise = round(rnorm(n(), 5, 2), 0)
+  )
+```
+
+## Sales data
+
+Calculate from inputs so that I have a series I can model.
+
+I use different assumptions here than in the model development later just to show that models aren't perfect.
+
+```{r}
+## Build sales 
+# making up a regression as I go along
+
+d0_sales <- d0 |> 
+  # Transform media with carryover and diminishing returns
+  mutate(
+    trans__tv = stats::filter(media__tv_spend, 0.3, method = "recursive"),
+    trans__newspp = stats::filter(media__newspp_spend, 0.05, method = "recursive"),
+    trans__bllbrd = stats::filter(media__bllbrd_spend, 0.2, method = "recursive"),
+  ) |> 
+  #... diminishing returns now
+  # .... simple power for now
+  mutate(across(starts_with("trans__"), \(xx){round(xx^0.9)})) |> 
+  # Sales
+  mutate(
+    sales__total = 150 #intercept
+    + 1 * (baseline__trend ^ 1.1)
+    + 50 * baseline__holiday_easter
+    + 25 * baseline__holiday_thanksgiving
+    + 75 * baseline__holiday_christmas
+    - 75 * baseline__summer
+    + 1 * unobserved__noise
+    
+    # marketing
+    + 3 * trans__tv
+    + 4 * trans__newspp
+    + 2 * trans__bllbrd
+    
+  ) |> 
+  mutate(sales__total = sales__total |> as.numeric()) |> 
+  relocate(sales__total, .after = time_week) |> 
+  select(-starts_with("trans__"), -unobserved__noise )
+```
+
+# Model Data
+
+Dataset that goes into the model
+
+```{r}
+
+cheesecake_data <- d0_sales |> 
+  select(time_year, time_week,
+         seasonality = time_holiday,
+         sales = sales__total,
+         matches("media__.+_imp")) |> 
+  rename(tv = media__tv_imp, billboard = media__bllbrd_imp, newspaper = media__newspp_imp) |> 
+  mutate(time_year = time_year+1985)
+
+```
+
+# Marketing spend inputs for ROI
+
+```{r}
+media_spend <- d0_sales |> 
+  select(time_year, time_week,
+         matches("media__.+_spend")) |> 
+  rename_with(\(x){stringr::str_remove(x, "media__")}) |> 
+  mutate(time_year = time_year+1985)
+```
+

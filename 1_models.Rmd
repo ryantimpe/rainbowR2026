@@ -1,0 +1,585 @@
+---
+title: "The Cheesecake ROI: Models"
+---
+
+MMMs in Tidymodels for RainbowR conference
+
+Models seen on slides
+
+```{r}
+library(tidymodels)
+```
+
+Load data from 0_dataset.Rmd
+
+
+# SLIDE - cheesecake sales
+
+Chart built here.
+Manually redrawn in Procreate iPad for hand drawn feel and animations.
+
+Use monthly instead of weekly for clarity.
+
+```{r}
+
+d0_sales |> 
+  select(time_year, time_week,
+         seasonality = time_holiday,
+         sales = sales__total,
+         trend = baseline__trend,
+         matches("media__.+_spend")) |> 
+  rename(tv = media__tv_spend, billboard = media__bllbrd_spend, newspaper = media__newspp_spend) |> 
+  mutate(time_month = case_when(
+    # 4-4-5 month system (lazy way)
+    ((time_week-1) %% 13)+1 <= 4 ~ 1 + 3*(time_week-1) %/% 13,
+    ((time_week-1) %% 13)+1 <= 8 ~ 2 + 3*(time_week-1) %/% 13,
+    TRUE ~ 3 + 3*(time_week-1) %/% 13
+  )) |>
+  group_by(time_year, time_month) |> 
+  summarize(across(c(-time_week, -seasonality), \(x){sum(x, na.rm=TRUE)})) |> 
+  mutate(across(c(tv, billboard, newspaper), \(x){ifelse(x==0, NA, x)})) |> 
+  mutate(ym= paste0(time_year, "M", stringr::str_pad(time_month, 2, pad="0"))) |> 
+  ggplot() +
+  aes(x = ym, y = sales, group = 1)+
+  geom_line()+
+  geom_point(aes(y=tv), color = "blue")+
+  geom_point(aes(y=billboard), color = "red", shape = 22)+
+  geom_point(aes(y=newspaper), color = "green", shape = 13)+
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 90)
+  )
+
+```
+
+# SLIDE - simple models
+
+Show how lm() compares to a basic tidymodels
+
+```{r}
+
+m1_lm <- lm(
+  sales ~ . 
+  , data = cheesecake_data|> select(-time_year, -time_week))
+
+print(summary(m1_lm), digits = 2)
+```
+
+# SLIDE - simple models
+
+Basic tidy model
+
+```{r}
+library(tidymodels)
+
+# Model Engine
+model_eng <- linear_reg() # Defaults to "lm"
+
+# Recipe
+model_rec <- recipe(sales ~ .,
+                    data = cheesecake_data) |> 
+  update_role(time_year, time_week, new_role = "ID")
+
+# Join with a workflow
+model_wf <- workflow() |> 
+  add_model(model_eng) |> 
+  add_recipe(model_rec)
+
+# Fit
+fit(model_wf, data = cheesecake_data) |> tidy()
+```
+
+# SLIDE - Feature Engineering
+
+Part 1
+
+Redo model with step_dummy()
+Add in step_range()
+
+```{r}
+
+# Model Engine
+model_eng <- linear_reg() # Defaults to "lm"
+
+# Recipe
+model_rec <- recipe(sales ~ .,
+                 data = cheesecake_data) |> 
+  update_role(time_year, time_week, new_role = "ID") |> 
+  step_dummy(seasonality) |> 
+  # Min-max scale marketing
+  step_range(tv, billboard, newspaper,
+             min = 0, max = 1, 
+             clipping = FALSE)
+
+# Join with a workflow
+model_wf <- workflow() |> 
+  add_model(model_eng) |> 
+  add_recipe(model_rec)
+
+# Fit
+fit(model_wf, data = cheesecake_data) |> tidy()
+```
+
+# SLIDE - Feature engineering for MMM
+
+For the custom step_*() functions, I used the ones I previously wrote for my job. However, I can't include them in this repo.
+
+I recommend using an LLM.
+
+I prompted Gemini: Can you write me a custom step_*() function for Tidymodels Recipes to raise an input series to a power less than 1?
+
+and got the below. It needs some work for error evaluation but the structure is there.
+
+```{r}
+library(recipes)
+library(rlang)
+
+step_power <- function(
+  recipe, 
+  ..., 
+  role = NA, 
+  trained = FALSE, 
+  power = 1, # Default to 1 (linear)
+  skip = FALSE,
+  id = rand_id("power")
+) {
+  add_step(
+    recipe, 
+    step_power_new(
+      terms = enquos(...), 
+      role = role, 
+      trained = trained, 
+      power = power, 
+      skip = skip,
+      id = id
+    )
+  )
+}
+
+# 1. The Constructor
+step_power_new <- function(terms, role, trained, power, skip, id) {
+  step(
+    subclass = "power", 
+    terms = terms, 
+    role = role, 
+    trained = trained, 
+    power = power, 
+    skip = skip,
+    id = id
+  )
+}
+
+# 2. The Prep (Nothing to "learn" here, so we just return)
+prep.step_power <- function(x, training, info = NULL, ...) {
+  step_power_new(
+    terms = x$terms, 
+    role = x$role, 
+    trained = TRUE, 
+    power = x$power, 
+    skip = x$skip,
+    id = x$id
+  )
+}
+
+# 3. The Bake (The actual math: x^power)
+bake.step_power <- function(object, new_data, ...) {
+  # Use tidyselect to find which columns the user picked in step_power()
+  col_names <- recipes::recipes_eval_select(object$terms, new_data, info = NULL)
+  
+  for (v in col_names) {
+    # The actual math: x^power
+    # Using pmax(..., 0) to prevent NaN if your power is a decimal and spend is 0
+    new_data[[v]] <- new_data[[v]]^object$power
+  }
+  
+  # Return the modified tibble as a tibble
+  tibble::as_tibble(new_data)
+}
+```
+
+
+
+```{r}
+# source("functions/step_power.R")
+# source("functions/step_adstock.R")
+# source("functions/step_s_curve.R")
+
+# Model Engine
+model_eng <- linear_reg() # Defaults to "lm"
+
+model_rec <- 
+  recipe(sales ~ .,
+         data = cheesecake_data) |> 
+  update_role(time_year, time_week, 
+              new_role = "ID") |> 
+  step_dummy(seasonality) |> 
+  
+  # Carryover impact, specified for each input
+  step_adstock(tv, billboard, carryover = 0.3) |> 
+  step_adstock(newspaper, carryover = 0.1) |> 
+  
+  # Diminishing returns for all marketing
+  step_power(tv, billboard, newspaper,
+             power = 0.9) |> 
+  
+  # Order of operations matter
+  step_range(tv, billboard, newspaper,
+             min = 0, max = 1, clipping = FALSE) 
+
+# Join with a workflow
+model_wf <- workflow() |> 
+  add_model(model_eng) |> 
+  add_recipe(model_rec)
+
+# Fit
+fit(model_wf, data = cheesecake_data) |> tidy()
+
+```
+
+
+# SLIDE - Scaling out
+
+Swapping to a Bayesian engine
+
+```{r}
+# Model Engine
+model_eng <- linear_reg() |> 
+  set_engine("stan")
+
+# Recipe
+model_rec <- recipe(sales ~ .,
+                    data = cheesecake_data) |> 
+  update_role(time_year, time_week, new_role = "ID")
+
+# Join with a workflow
+model_wf <- workflow() |> 
+  add_model(model_eng) |> 
+  add_recipe(model_rec)
+
+# Fit
+fit(model_wf, data = cheesecake_data) |> tidy()
+```
+Including priors
+
+```{r}
+# Model Engine
+
+model_priors <- rstanarm::normal(
+  # Mean
+  location = c(100, 100, -100, 100, #Seasonality
+               100, 100, 100),  #Marketing
+  # Std Dev
+  scale = 50)
+
+model_eng <- linear_reg() |> 
+  set_engine(engine = "stan",
+             prior = model_priors)
+
+# Recipe
+model_rec <- recipe(sales ~ .,
+                    data = cheesecake_data) |> 
+  update_role(time_year, time_week, new_role = "ID") |> 
+  
+  # Carryover impact, specified for each input
+  step_adstock(tv, billboard, carryover = 0.3) |> 
+  step_adstock(newspaper, carryover = 0.1) |> 
+  
+  # Diminishing returns for all marketing
+  step_power(tv, billboard, newspaper,
+             power = 0.9) |> 
+  
+  # Order of operations matter
+  step_range(tv, billboard, newspaper,
+             min = 0, max = 1, clipping = FALSE) 
+
+# Join with a workflow
+model_wf <- workflow() |> 
+  add_model(model_eng) |> 
+  add_recipe(model_rec) 
+
+# Fit
+fit(model_wf, data = cheesecake_data) |> tidy()
+```
+
+
+# SLIDE - Scaling Up
+
+Functional programming for modeling
+
+Function version no bayes
+
+```{r}
+
+# Define function to run model with different marketing
+run_mmm <- function(marketing_inputs){
+  
+  # Model engine
+  model_eng <- linear_reg()
+  
+  # Recipe
+  model_rec <- recipe(cheesecake_data) |> 
+    update_role(time_year, time_week, new_role = "ID") |> 
+    update_role(sales, new_role = "outcome") |> 
+    update_role(seasonality, new_role = "predictor") |> 
+    
+    #Marketing inputs defined in function call
+    update_role(any_of(marketing_inputs), 
+                new_role = "predictor") |> 
+    
+    # Diminishing returns for all marketing
+    step_power(any_of(marketing_inputs),
+               power = 0.9)
+  
+  # Join with a workflow
+  model_wf <- workflow() |> 
+    add_model(model_eng) |> 
+    add_recipe(model_rec) 
+  
+  # Fit
+  fit(model_wf, data = cheesecake_data) |> tidy()
+}
+
+
+# Model with TV and Newspaper only
+run_mmm(c("tv", "newspaper"))
+
+
+```
+
+
+# SLIDE - Optimizing
+
+Tuning.
+
+Need to register your custom step_*() functions with Dials. Here's an example with step_power().
+
+Used Gemini to write this for me.
+
+```{r}
+#library(dials)
+
+# Define the 'power' parameter rules
+power_val <- function(range = c(0.2, 1), trans = NULL) {
+  new_quant_param(
+    type = "double",
+    range = range,
+    inclusive = c(TRUE, TRUE),
+    trans = trans,
+    label = c(power_val = "Power Transformation"),
+    finalize = NULL
+  )
+}
+
+tunable.step_power <- function(x, ...) {
+  tibble::tibble(
+    name = "power",
+    callback = "power_val", # or a custom dials function
+    source = "recipe",
+    component = "step_power",
+    component_id = x$id
+  )
+}
+
+```
+
+Grid search for TV and Newspaper power tuning.
+
+```{r}
+library(dials)
+
+# Model Engine
+model_eng <- linear_reg(engine = "stan")
+
+# Recipe
+model_rec <- recipe(sales ~ .,
+                 data = cheesecake_data) |> 
+  update_role(time_year, time_week, new_role = "ID") |> 
+  
+  # Carryover impact, specified for each input
+  step_adstock(tv, billboard, carryover = 0.3) |> 
+  step_adstock(newspaper, carryover = 0.1) |> 
+  
+  # Diminishing returns for all marketing
+  step_power(billboard, power = 0.9) |> 
+  step_power(tv, power = tune("tv")) |> 
+  step_power(newspaper, power = tune("newspaper")) |> 
+  
+  # Order of operations matter
+  step_range(tv, billboard, newspaper,
+             min = 0, max = 1, clipping = FALSE) 
+
+extract_parameter_set_dials(model_rec)
+
+model_resamples <- rolling_origin(
+  cheesecake_data,
+  initial = 52,    # Train on 1 year
+  assess = 26,      # Test on the next month
+  cumulative = TRUE, # Keep adding to the training set as you go
+  skip = 26          # Move forward by a month each time
+)
+
+model_tune_grid <- expand.grid(
+  tv = seq(0.75, 1, by = 0.05),
+  newspaper = seq(0.7, 0.9, by = 0.1))
+
+
+# Define the workflow
+model_wflow <- workflow() %>%
+  add_model(model_eng) %>%
+  add_recipe(model_rec)
+
+model_res <- tune_grid(model_wflow, 
+                    resamples = model_resamples,
+                    grid = model_tune_grid)
+
+show_best(model_res, metric = "rmse")
+
+model_res |> collect_metrics()
+
+```
+
+
+# SLIDE - Scenario optimization
+
+```{r}
+
+model_eng <- linear_reg() |> 
+  set_engine(engine = "stan")
+
+# Recipe
+model_rec <- recipe(sales ~ .,
+                 data = cheesecake_data) |> 
+  update_role(time_year, time_week, new_role = "ID") |> 
+  step_dummy(seasonality) |> 
+  
+  # Carryover impact, specified for each input
+  step_adstock(tv, billboard, carryover = 0.3) |> 
+  step_adstock(newspaper, carryover = 0.1) |> 
+  
+  # Diminishing returns for all marketing
+  step_power(tv, billboard, 
+             power = 0.9) |>
+  step_s_curve(newspaper, saturation = 0.7)
+
+# Join with a workflow
+model_wf <- workflow() |> 
+  add_model(model_eng) |> 
+  add_recipe(model_rec) 
+
+# Fit
+model_fit <- fit(model_wf, data = cheesecake_data)
+```
+
+Calculate weekly contributions coming out of the model.
+
+```{r}
+model_fit_engine <- model_fit |> extract_fit_engine()
+
+model_id_vars <- model_fit %>% extract_mold()
+model_id_vars <-  model_id_vars$extras$roles$ID
+
+# Contributions
+
+model_contr <- model_fit_engine$model |> 
+  rename(sales = `..y`) |> 
+  bind_cols(model_id_vars) |> 
+  mutate(`(Intercept)` = 1) |> 
+  pivot_longer(c(-time_year, -time_week, -sales), names_to = "term") |> 
+  left_join(
+    tidy(model_fit) |> select(term, estimate)
+  ) |> 
+  # Raw contributions... there's a residual each week
+  mutate(contr_unscaled = value * estimate) |> 
+  # Scaled contributions ... super simple assumption to spread the residual evenly over inputs
+  group_by(time_year, time_week) |> 
+  mutate(contr = contr_unscaled * sales / sum(contr_unscaled)) |> 
+  ungroup() |> 
+  #Bring in spend
+  left_join(media_spend |> 
+              pivot_longer(contains("spend"), names_to = "term", values_to = "spend") |> 
+              mutate(term = stringr::str_remove(term, "_spend"),
+                     term = case_when(
+                       term == "newspp" ~ "newspaper",
+                       term == "bllbrd" ~ "billboard",
+                       TRUE ~ term
+                     ))
+  ) |> 
+  replace_na(list(spend = 0))
+
+# ROI
+
+model_contr |> 
+  filter(term %in% c("tv", "billboard", "newspaper")) |> 
+  group_by(term, time_year) |> 
+  summarize(across(c(contr_unscaled, spend), sum),
+            .groups = "drop") |> 
+  ungroup() |> 
+  mutate(ROI = contr_unscaled / spend)
+```
+
+Various newspaper scenarios
+
+```{r}
+newspaper_scens <- seq(0, 3, by=0.1) |> purrr::map(\(xx){
+  cheesecake_data |> 
+    filter(time_year == 1988) |> 
+    mutate(newspaper = newspaper * xx) |> 
+    mutate(scenario = xx)
+})
+
+
+newspaper_scens |> 
+  purrr::map( \(x){
+    model_fit |> predict(new_data = x) |> 
+      mutate(scenario = x$scenario[1],
+             .pred = .pred)
+  }) |> 
+  bind_rows() |> 
+  count(scenario, wt = .pred) |> 
+  mutate(n = n-first(n)) |> 
+  mutate(spend = scenario * media_spend |> filter(time_year == 1988) |> pull(newspp_spend) |> sum()) |> 
+  ggplot() +
+  aes(x = spend, y = n/spend)+
+  geom_line(color = "#007A46") +
+  labs(title = "Cheesecake ROI driven by Newspaper marketing",
+       subtitle = "based on 1988 performance",
+       x = "Newspaper marketing investment",
+       y = NULL) +
+  scale_x_continuous(labels = scales::dollar_format()) +
+  theme_minimal() +
+  theme(text = element_text(color = "black"),
+        axis.text.y = element_text(color = "black", size = 12),
+        axis.text.x = element_text(color = "black", size = 12))
+
+
+```
+
+```{r}
+newspaper_scens |> 
+  purrr::map( \(x){
+    model_fit |> predict(new_data = x) |> 
+      mutate(scenario = x$scenario[1],
+             .pred = .pred)
+  }) |> 
+  bind_rows() |> 
+  count(scenario, wt = .pred) |> 
+  mutate(n = n-first(n)) |> #Quick hack to just deduct the sales at Newspaper = 0 to get incremental. THis works because it's a linear model, not log-linear.
+  mutate(spend = scenario * media_spend |> filter(time_year == 1988) |> pull(tv_spend) |> sum()) |> 
+  ggplot() +
+  aes(x = spend, y = n) +
+  geom_line(color = "#007A46") +
+  labs(title = "Cheesecake sales driven by Newspaper marketing",
+       subtitle = "based on 1988 performance",
+       x = "Newspaper marketing investment",
+       y = NULL) +
+  scale_y_continuous(labels = scales::dollar_format()) +
+  scale_x_continuous(labels = scales::dollar_format()) +
+  theme_minimal() +
+  theme(text = element_text(color = "black"),
+        plot.title = element_text(size = 16),
+        plot.subtitle = element_text(size = 14),
+        axis.text.y = element_text(color = "black", size = 12),
+        axis.text.x = element_text(color = "black", size = 12),
+        axis.title.x = element_text(size = 14))
+
+```
